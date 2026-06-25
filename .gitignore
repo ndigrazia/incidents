@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Custom project ignores
+Diffusion/
+tmp/
+.python-version
+conf/query_time.txt
+out/
