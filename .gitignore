@@ -221,6 +221,5 @@ __marimo__/
 Diffusion/
 tmp/
 .python-version
-conf/query_time.txt
 out/
 litellm/
