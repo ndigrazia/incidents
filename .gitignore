@@ -223,3 +223,4 @@ tmp/
 .python-version
 conf/query_time.txt
 out/
+litellm/

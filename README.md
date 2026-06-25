@@ -1,6 +1,6 @@
 # BMC Remedy to Azure Storage Queue Integration & AI Incident Summarizer
 
-A high-performance, production-ready Python service suite designed to pull incident records from the BMC Remedy `TASA_Query_Incident` SOAP web service, validate and model them using Pydantic, dispatch them to an Azure Storage Queue, and automatically process and summarize their notes using a LangChain-powered Gemini LLM before pushing them to an downstream Summaries Queue.
+A high-performance, production-ready Python service suite designed to pull incident records from the BMC Remedy `TASA_Query_Incident` SOAP web service, validate and model them using Pydantic, dispatch them to an Azure Storage Queue, and automatically process and summarize their notes using a LangChain-powered LLM (supporting both Google Gemini and LiteLLM Proxy) before pushing them to a downstream Summaries Queue.
 
 ---
 
@@ -14,9 +14,9 @@ The system operates as an asynchronous, decoupled publisher-subscriber architect
 |    BMC Remedy    | <=========> |   SOAP Client Loader   | ==========> | Azure Storage Queue (Main) |
 |   SOAP Service   |    SOAP     |      (Publisher)       |   HTTPS     |      [loader_incidents.py] |
 |                  |   Request   |  [loader/soap_client]  |             +----------------------------+
-+------------------+             +------------------------+                           ||
-                                                                                      || (Pull Messages)
-                                                                                      \/
+| +------------------+             +------------------------+                           ||
+                                                                                        || (Pull Messages)
+                                                                                        \/
 +------------------+             +------------------------+             +----------------------------+
 |  Summaries Queue |             |  Queue Receiver Daemon |             |                            |
 |    "incidents-   | <========== |       (Subscriber)     | <========== | Azure Storage Queue Poison |
@@ -26,7 +26,7 @@ The system operates as an asynchronous, decoupled publisher-subscriber architect
                                              || (Summarize via LangChain LCEL)
                                              \/
                                  +------------------------+
-                                 |  Gemini AI Summarizer  |
+                                 |   AI Notes Summarizer  |
                                  |  [handler/summarizer]  |
                                  +------------------------+
 ```
@@ -46,16 +46,18 @@ The system operates as an asynchronous, decoupled publisher-subscriber architect
    - Formats and sends the output to a dedicated Summaries Queue.
    - Handles termination signals gracefully to prevent dirty state shutdowns.
 4. **AI Notes Summarizer (`handler/summarizer.py`)**:
-   - Built on LangChain Expressive Language (LCEL) using Gemini (`gemini-2.5-flash`).
+   - Built on LangChain Expressive Language (LCEL) supporting both Google Gemini and LiteLLM Proxy.
    - Condenses complex incident notes into a concise, actionable summary.
-   - Returns clear error messages or handles empty logs robustly.
+   - Performs strict environment variable and parameter validations during initialization.
 
 ---
 
 ## Key Features
 
-- **Decoupled AI Pipeline**: Automatically processes incidents as they are received. Incident notes are sent to the Gemini API, and the summary is forwarded to the downstream queue.
-- **Incident ID Prefixing**: All messages published to the summaries queue are prefixed with `Incident <incident_id>: <summary>` (or `No comment` if no notes or summary were available) to guarantee clear traceabilty.
+- **Multi-Provider LLM Support**: Dynamically switch between Google Gemini (`gemini`) and LiteLLM Proxy (`litellm`) using environment variables or initialization parameters.
+- **Strict Validation**: Performs comprehensive config validation upon initialization, raising meaningful exceptions if any required API credentials or configurations are missing.
+- **Decoupled AI Pipeline**: Automatically processes incidents as they are received. Incident notes are sent to the selected LLM, and the summary is forwarded to the downstream queue.
+- **Incident ID Prefixing**: All messages published to the summaries queue are prefixed with `Incident <incident_id>: <summary>` (or `No comment` if no notes or summary were available) to guarantee clear traceability.
 - **Configurable Downstream Queue**: The target queue for summaries defaults to `"incidents-summaries"` but is completely customizable using environment variables.
 - **Robust Exception and Retry Strategy**: Built-in exponential backoff using `tenacity` wraps outgoing HTTP requests, shielding the publisher from transient SOAP-endpoint network timeouts.
 - **XML Injection Defenses**: Dynamically generates SOAP envelopes while strictly escaping all inputs (qualification queries, authentication credentials) to eliminate SOAP/XML injection vulnerabilities.
@@ -78,7 +80,7 @@ The system operates as an asynchronous, decoupled publisher-subscriber architect
 │       └── models.py            # Pydantic schema mappings for Remedy Incidents and raw SOAP responses
 ├── handler/
 │   ├── __init__.py
-│   └── summarizer.py            # LangChain Gemini LLM summarizing component
+│   └── summarizer.py            # LangChain Gemini & LiteLLM Proxy summarizing component
 ├── queue/
 │   ├── __init__.py
 │   ├── azure_queue_sender.py    # Azure Queue Publisher (base64-encoded JSON/text dispatcher)
@@ -125,10 +127,24 @@ AZURE_POISON_QUEUE_NAME=your_target_queue_name-poison
 AZURE_SUMMARIES_QUEUE_NAME=incidents-summaries
 
 # ==========================================
-# Gemini AI Configuration
+# LLM Provider Selection
+# ==========================================
+LLM_PROVIDER=gemini # Option: gemini, litellm
+
+# ==========================================
+# Gemini AI Configuration (if provider=gemini)
 # ==========================================
 GEMINI_MODEL_NAME=gemini-2.5-flash
-GEMINI_API_KEY=your_gemini_api_key
+GOOGLE_API_KEY=your_gemini_api_key
+
+# ==========================================
+# LiteLLM Proxy Configuration (if provider=litellm)
+# ==========================================
+LITELLM_API_BASE=https://omni-gateway-test.az.tcoretrack.com:9443/llm-gateway
+LITELLM_API_KEY=your_litellm_api_key
+LITELLM_MODEL_NAME=openai/gemini/llm
+LITELLM_CLIENT_ID=your_litellm_client_id
+LITELLM_CLIENT_SECRET=your_litellm_client_secret
 
 # ==========================================
 # Receiver Daemon Settings
@@ -171,7 +187,7 @@ uv run python loader_incidents.py
 ```
 
 ### 2. Execute the Azure Queue Consumer Daemon & AI Pipeline
-To run the background processor that continuously polls the Azure Storage Queue, generates incident notes summaries using the Gemini LLM, and dispatches them to the summaries queue:
+To run the background processor that continuously polls the Azure Storage Queue, generates incident notes summaries using the selected LLM, and dispatches them to the summaries queue:
 
 ```bash
 uv run python receiver_incidents.py
@@ -182,7 +198,7 @@ uv run python receiver_incidents.py
 
 ## Test Suite Execution
 
-The codebase contains a comprehensive unit testing architecture with **53 test cases** covering negative scenarios, network timeouts, serialization, state management, LLM summarization patterns, custom queue environment naming, and retry semantics. All testing leverages mocks to guarantee no outbound calls are executed.
+The codebase contains a comprehensive unit testing architecture with **57 test cases** covering negative scenarios, network timeouts, serialization, state management, LLM provider selection and validation, custom queue environment naming, and retry semantics. All testing leverages mocks to guarantee no outbound calls are executed.
 
 To run the complete test suite:
 
@@ -191,6 +207,7 @@ PYTHONPATH=. uv run pytest -v
 ```
 
 ### Key Test Categories Covered:
+- **LLM Provider & Configuration Validation**: Verifies that the summarizer raises correct exceptions when provider parameters are missing, and handles both `gemini` and `litellm` selection properly.
 - **AI Summary Logic**: Verifies correct summarization outputs, fallback behavior on LLM failure, and empty/whitespace handling.
 - **Incident ID Prefix Assertions**: Confirms that queue messages correctly bundle Incident IDs in both Pydantic model formats and raw JSON dictionaries.
 - **XML Parsing Integrity**: Verifies security against SOAP-injection exploits, empty XML envelopes, and missing elements.
